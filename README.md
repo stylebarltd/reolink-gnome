@@ -9,6 +9,21 @@ Works without configuration. Optional `~/.config/reolink-cams/config.json`:
  "names": {"ec:71:db:02:c9:43": "balcony"}}
 ```
 
+Live snapshots (shown while the menu is open) need credentials in the config and a venv with `reolink_aio`:
+
+```sh
+python3 -m venv ~/.local/share/reolink-cams/venv
+~/.local/share/reolink-cams/venv/bin/pip install reolink_aio
+```
+
+Config additions: `user`, `password`, `snapshotSeconds` (keep the file `chmod 600`). See [`config.example.json`](config.example.json) for all options:
+
+```sh
+mkdir -p ~/.config/reolink-cams
+cp config.example.json ~/.config/reolink-cams/config.json
+chmod 600 ~/.config/reolink-cams/config.json
+```
+
 Install:
 
 ```sh

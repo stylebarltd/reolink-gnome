@@ -1,0 +1,10 @@
+{
+  "user": "admin",
+  "password": "CHANGE_ME",
+  "snapshotSeconds": 3,
+  "snapshotStream": "sub",
+  "port": 9000,
+  "subnet": "192.168.1",
+  "refreshSeconds": 120,
+  "names": {"ec:71:db:02:c9:43": "balcony"}
+}
