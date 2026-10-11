@@ -9,6 +9,7 @@ import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
+import * as MessageTray from 'resource:///org/gnome/shell/ui/messageTray.js';
 
 const CONFIG_DIR = GLib.build_filenamev([GLib.get_user_config_dir(), 'reolink-cams']);
 const CONFIG_PATH = GLib.build_filenamev([CONFIG_DIR, 'config.json']);
@@ -27,12 +28,31 @@ const DEFAULTS = {
     snapshotStream: 'sub',
     names: {},               // {"ec:71:db:02:c9:43": "balcony"} optional friendly names
     rtsp: {},                // {"<uid or mac>": "rtsp://127.0.0.1:8554/fountain"} stream base (…/main, …/sub), e.g. Neolink
+    alertTypes: ['people', 'vehicle'],   // AI detections that alert; add 'dog_cat', or 'motion' for any motion
+    alertCameras: [],        // names, uids or MACs that alert; empty = all
+    alertCooldownSeconds: 120,   // at most one notification per camera in this time
+    alertQuietHours: '',     // e.g. "23:00-06:00": no notifications (the menu still shows motion)
 };
 // MAC prefixes registered to Reolink; other hosts with the port open are shown as "unknown".
 const REOLINK_OUI = ['ec:71:db'];
 
 // thumbnail size (16:9) per number of grid columns
 const THUMB = {1: [320, 180], 2: [288, 162], 3: [256, 144]};
+
+// how long the last detection stays listed under a camera
+const MOTION_SHOWN_MS = 30 * 60 * 1000;
+const TYPE_NAMES = {people: 'Person', vehicle: 'Vehicle', dog_cat: 'Animal', face: 'Face', package: 'Package', motion: 'Motion'};
+const typeText = types => types.map(t => TYPE_NAMES[t] ?? t).join(', ');
+const clock = ms => GLib.DateTime.new_from_unix_local(Math.floor(ms / 1000)).format('%H:%M');
+
+// "23:00-06:00" (may wrap midnight) contains the current local time
+const inQuietHours = range => {
+    const m = range?.match(/^(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})$/);
+    if (!m) return false;
+    const now = new Date(), cur = now.getHours() * 60 + now.getMinutes();
+    const from = +m[1] * 60 + +m[2], to = +m[3] * 60 + +m[4];
+    return from <= to ? cur >= from && cur < to : cur >= from || cur < to;
+};
 
 // St.BoxLayout swapped `vertical` for `orientation` in GNOME 48
 const vbox = params => {
@@ -69,6 +89,7 @@ const Indicator = GObject.registerClass(
 class Indicator extends PanelMenu.Button {
     _init() {
         super._init(0.5, 'Reolink Cameras');
+        this.add_style_class_name('reolink-button');
         const box = new St.BoxLayout({style_class: 'panel-status-menu-box reolink-chip'});
         this._icon = new St.Icon({icon_name: 'camera-web-symbolic', style_class: 'system-status-icon'});
         box.add_child(this._icon);
@@ -86,6 +107,8 @@ class Indicator extends PanelMenu.Button {
         this._pics = new Map();   // mac -> {widget, w, h}
         this._dots = new Map();   // mac -> online dot (pulses while live)
         this._playBtns = new Map();   // mac -> play/stop button
+        this._subs = new Map();   // mac -> IP label, which shows the last detection instead
+        this._motion = new Map();   // mac -> {active, types, time}
     }
 
     onOpen(cb) { this.menu.connect('open-state-changed', (_m, open) => cb(open)); }
@@ -113,14 +136,45 @@ class Indicator extends PanelMenu.Button {
     setNotice(text) {
         this._notice = text;
         this._label.set_text(text ?? this._count ?? '…');
-        if (text) pulse(this._icon);
+        this._updateIcon();
+    }
+
+    // Motion state of a camera: red pulsing dot while active, last detection under its name.
+    setMotion(mac, m) {
+        this._motion.set(mac, m);
+        this._showMotion(mac);
+        this._updateIcon();
+    }
+
+    _showMotion(mac) {
+        const m = this._motion.get(mac);
+        const dot = this._dots.get(mac);
+        if (dot) {
+            dot.style_class = m?.active ? 'reolink-motion' : 'reolink-online';
+            if (m?.active || mac === this._liveMac) pulse(dot);
+            else stopPulse(dot);
+        }
+        const sub = this._subs.get(mac);
+        if (sub) {
+            const recent = m && Date.now() - m.time < MOTION_SHOWN_MS;
+            sub.text = recent ? `${typeText(m.types)} · ${clock(m.time)}` : sub._ipText;
+            sub.style_class = recent ? 'reolink-alert-text' : 'reolink-sub';
+        }
+    }
+
+    _updateIcon() {
+        const alert = [...this._motion.values()].some(m => m.active);
+        if (alert) this._icon.add_style_class_name('reolink-motion');
+        else this._icon.remove_style_class_name('reolink-motion');
+        if (alert || this._notice) pulse(this._icon);
         else stopPulse(this._icon);
     }
 
     // Pulse the camera's green dot while its thumbnail plays live video.
     setLive(mac) {
-        if (this._liveMac && this._liveMac !== mac) stopPulse(this._dots.get(this._liveMac));
+        const prev = this._liveMac;
         this._liveMac = mac;
+        if (prev && prev !== mac) this._showMotion(prev);
         if (mac) pulse(this._dots.get(mac));
     }
 
@@ -146,6 +200,7 @@ class Indicator extends PanelMenu.Button {
         this._pics.clear();
         this._dots.clear();
         this._playBtns.clear();
+        this._subs.clear();
         const live = cams.filter(c => c.online);
         this._count = cams.length ? `${live.length}/${cams.length}` : '0';
         if (!this._notice) this._label.set_text(this._count);
@@ -200,14 +255,17 @@ class Indicator extends PanelMenu.Button {
         box.add_child(dot);
         if (c.online) {
             this._dots.set(c.mac, dot);
-            if (c.mac === this._liveMac) pulse(dot);
         }
         box.add_child(new St.Label({text: c.name, style_class: 'reolink-key', y_align: Clutter.ActorAlign.CENTER}));
-        box.add_child(new St.Label({
+        const sub = new St.Label({
             text: `${c.ip ?? '?'}${c.reolink ? '' : ' (unverified)'}`,
             style_class: 'reolink-sub', x_expand: true, x_align: Clutter.ActorAlign.END, y_align: Clutter.ActorAlign.CENTER,
-        }));
+        });
+        sub._ipText = sub.text;
+        box.add_child(sub);
         if (c.online) {
+            this._subs.set(c.mac, sub);
+            this._showMotion(c.mac);
             const refresh = this._iconButton('view-refresh-symbolic', () => {
                 // spin until the new snapshot is in (at least a moment, so a fast one still registers)
                 const icon = refresh.child;
@@ -264,6 +322,10 @@ export default class ReolinkExtension extends Extension {
         this._preparing(null);
         this._stopSnapshots();
         this._stopPlay();
+        this._stopEvents();
+        this._source?.destroy();
+        this._source = null;
+        this._alerted = null;
         this._cancel?.cancel();
         this._cancel = null;
         if (this._timer) GLib.source_remove(this._timer);
@@ -275,6 +337,7 @@ export default class ReolinkExtension extends Extension {
         this._known = null;
         this._lastOnline = null;
         this._frames = null;
+        this._motionState = null;
         this._snapBusy = null;
     }
 
@@ -332,10 +395,121 @@ export default class ReolinkExtension extends Extension {
                 this._saveKnown();
                 this._indicator?.render(this._cams(this._lastOnline ?? undefined));
             }
-            if ((!manual && !this._snapLoop) || !this._indicator) return;
-            if (this._playMac === mac && this._playLive) return;   // live video owns this tile
-            this._showFrame(mac, tmp);
+            // live video owns its tile
+            if ((manual || this._snapLoop) && this._indicator && !(this._playMac === mac && this._playLive))
+                this._showFrame(mac, tmp);
+            return tmp;
         } catch (_e) { /* camera busy or asleep; keep last frame */ }
+        return null;
+    }
+
+    // One events.py for all online Reolinks; restarted when that set of IPs changes.
+    _watchEvents(online) {
+        const ips = [...online].filter(mac => this._known[mac]?.reolink).map(mac => this._known[mac].ip).sort();
+        const key = ips.join(' ');
+        if (this._eventsProc && key === this._eventsKey) return;
+        this._stopEvents();
+        if (!ips.length) return;
+        try {
+            const proc = new Gio.Subprocess({
+                argv: [PYTHON, GLib.build_filenamev([this.path, 'events.py']), ...ips],
+                flags: Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_SILENCE,
+            });
+            proc.init(null);
+            const cancel = new Gio.Cancellable();
+            const stream = new Gio.DataInputStream({base_stream: proc.get_stdout_pipe(), close_base_stream: true});
+            const read = () => stream.read_line_async(GLib.PRIORITY_DEFAULT, cancel, (st, res) => {
+                let line;
+                try { [line] = st.read_line_finish_utf8(res); } catch (_e) { return; }
+                if (line === null) {   // helper died; the next scan starts a new one
+                    if (this._eventsProc === proc) this._eventsProc = null;
+                    return;
+                }
+                try { this._onEvent(JSON.parse(line)); } catch (e) { console.error(`reolink-cams: event: ${e.message}`); }
+                read();
+            });
+            read();
+            this._eventsProc = proc;
+            this._eventsCancel = cancel;
+            this._eventsKey = key;
+        } catch (e) {
+            console.error(`reolink-cams: events: ${e.message}`);
+        }
+    }
+
+    _stopEvents() {
+        this._eventsCancel?.cancel();
+        this._eventsProc?.force_exit();
+        this._eventsProc = this._eventsCancel = this._eventsKey = null;
+        // without a listener no "motion over" arrives; don't leave dots red
+        for (const [mac, m] of this._motionState ?? []) {
+            if (!m.active) continue;
+            m.active = false;
+            this._indicator?.setMotion(mac, m);
+        }
+    }
+
+    _onEvent(ev) {
+        if (!('motion' in ev) || !this._indicator) return;
+        const mac = Object.keys(this._known).find(m => this._known[m].ip === ev.ip && this._lastOnline?.has(m));
+        if (!mac) return;
+        const wanted = this._cfg.alertTypes;
+        const types = ev.types.filter(t => wanted.includes(t));
+        if (ev.motion && !types.length && wanted.includes('motion')) types.push('motion');
+        const prev = this._motionState?.get(mac);
+        this._motionState ??= new Map();
+        if (!ev.motion || !types.length) {
+            // motion without a wanted detection: just end an alert that was running
+            if (prev?.active) {
+                const m = {...prev, active: false};
+                this._motionState.set(mac, m);
+                this._indicator.setMotion(mac, m);
+            }
+            return;
+        }
+        const m = {active: true, types, time: Date.now()};
+        this._motionState.set(mac, m);
+        this._indicator.setMotion(mac, m);
+        this._alert(mac, types).catch(e => console.error(`reolink-cams: alert: ${e.message}`));
+    }
+
+    async _alert(mac, types) {
+        const k = this._known[mac];
+        const name = this._cams(this._lastOnline ?? undefined).find(c => c.mac === mac)?.name ?? k.ip;
+        const listed = this._cfg.alertCameras;
+        if (listed.length && !listed.some(x => [mac, k.uid, name.toLowerCase()].includes(String(x).toLowerCase())))
+            return;
+        if (inQuietHours(this._cfg.alertQuietHours)) return;
+        this._alerted ??= new Map();
+        const now = Date.now();
+        if (now - (this._alerted.get(mac) ?? 0) < this._cfg.alertCooldownSeconds * 1000) return;
+        this._alerted.set(mac, now);
+
+        // a fresh picture of what triggered it, kept under its own name for the notification
+        const snap = await Promise.race([
+            this._snapshot(mac, true),
+            new Promise(r => GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 10, () => { r(null); return GLib.SOURCE_REMOVE; })),
+        ]);
+        if (!this._indicator) return;
+        let gicon = null;
+        if (snap) {
+            const pic = GLib.build_filenamev([SNAP_DIR, `${mac.replaceAll(':', '')}-alert.jpg`]);
+            try {
+                Gio.File.new_for_path(snap).copy(Gio.File.new_for_path(pic), Gio.FileCopyFlags.OVERWRITE, null, null);
+                gicon = new Gio.FileIcon({file: Gio.File.new_for_path(pic)});
+            } catch (_e) { /* no picture then */ }
+        }
+        if (!this._source) {
+            this._source = new MessageTray.Source({title: 'Reolink Cameras', iconName: 'camera-web-symbolic'});
+            this._source.connect('destroy', () => { this._source = null; });
+            Main.messageTray.add(this._source);
+        }
+        const n = new MessageTray.Notification({
+            source: this._source, title: `${typeText(types)} at ${name}`,
+            body: `${clock(now)} · click to watch live`, gicon,
+        });
+        n.connect('activated', () => this._live(mac, name));
+        this._source.addNotification(n);
     }
 
     // Fullscreen ffplay window; one per camera, closed with Esc or q.
@@ -593,6 +767,7 @@ export default class ReolinkExtension extends Extension {
 
             this._lastOnline = online;
             this._indicator.render(this._cams(online));
+            this._watchEvents(online);
             this._indicator.setStatus(`Scanned ${subnet}.0/24 · ${new Date().toLocaleTimeString()}`);
         } catch (e) {
             if (!cancel.is_cancelled()) this._indicator?.setStatus(`Scan failed: ${e.message}`);

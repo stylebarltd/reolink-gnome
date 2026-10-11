@@ -4,3 +4,17 @@
 .reolink-offline { color: #ed333b; }
 /* faint pill so neighbouring top-bar items read as separate groups */
 .reolink-chip { background-color: rgba(255, 255, 255, 0.07); border-radius: 8px; padding: 0 8px; margin: 4px 0; }
+/* the theme's own hover/open highlight is a full-height pill on the button; drop it
+   and shade the chip instead so the shape stays the same */
+#panel .panel-button.reolink-button,
+#panel .panel-button.reolink-button:hover,
+#panel .panel-button.reolink-button:focus,
+#panel .panel-button.reolink-button:active,
+#panel .panel-button.reolink-button:checked { box-shadow: none; background-color: transparent; }
+#panel .reolink-button:hover .reolink-chip,
+#panel .reolink-button:focus .reolink-chip { background-color: rgba(255, 255, 255, 0.17); }
+#panel .reolink-button:active .reolink-chip,
+#panel .reolink-button:checked .reolink-chip { background-color: rgba(255, 255, 255, 0.28); }
+#panel .reolink-button:checked:hover .reolink-chip { background-color: rgba(255, 255, 255, 0.32); }
+.reolink-motion { color: #ff7b63; }
+.reolink-alert-text { color: #ff7b63; font-size: 0.9em; }
