@@ -2,6 +2,6 @@
   "uuid": "reolink-cams@pola",
   "name": "Reolink Cameras",
   "description": "Discovers Reolink cameras on the local network and shows their online state in the top bar.",
-  "shell-version": ["50"],
+  "shell-version": ["46", "47", "48", "49", "50"],
   "version": 1
 }
