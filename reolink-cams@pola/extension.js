@@ -19,7 +19,7 @@ const DEFAULTS = {
     port: 9000,              // Reolink Baichuan/media port (HTTP API is off on these cameras)
     subnet: '',              // e.g. "192.168.1"; empty = auto-detect from default route
     refreshSeconds: 120,
-    connectTimeoutSeconds: 1,
+    connectTimeoutSeconds: 3,   // WiFi cameras in power-save can take >1s to accept
     concurrency: 48,
     snapshotSeconds: 3,      // refresh interval for thumbnails while the menu is open
     snapshotStream: 'sub',
@@ -177,6 +177,12 @@ export default class ReolinkExtension extends Extension {
             await new Promise((res, rej) => proc.wait_check_async(this._cancel, (p, r) => {
                 try { res(p.wait_check_finish(r)); } catch (e) { rej(e); }
             }));
+            // a snapshot needs a Baichuan login, so this host is a Reolink whatever its MAC vendor
+            if (!this._known[mac].reolink) {
+                this._known[mac].reolink = true;
+                this._saveKnown();
+                this._indicator?.render(this._cams(this._lastOnline ?? undefined));
+            }
             if ((!manual && !this._snapLoop) || !this._indicator) return;
             // hand St a fresh path every frame (copy), and drop the previous one
             const frame = tmp.replace(/\.jpg$/, `-${Date.now()}.jpg`);
@@ -187,6 +193,13 @@ export default class ReolinkExtension extends Extension {
             this._indicator.setSnapshot(mac, frame);
             if (prev) try { Gio.File.new_for_path(prev).delete(null); } catch (_e) { /* gone */ }
         } catch (_e) { /* camera busy or asleep; keep last frame */ }
+    }
+
+    _saveKnown() {
+        try {
+            GLib.mkdir_with_parents(GLib.path_get_dirname(CACHE_PATH), 0o755);
+            GLib.file_set_contents(CACHE_PATH, JSON.stringify(this._known));
+        } catch (_e) { /* cache is optional */ }
     }
 
     async _detectSubnet() {
@@ -257,10 +270,7 @@ export default class ReolinkExtension extends Extension {
                     lastSeen: Date.now(),
                 };
             }
-            try {
-                GLib.mkdir_with_parents(GLib.path_get_dirname(CACHE_PATH), 0o755);
-                GLib.file_set_contents(CACHE_PATH, JSON.stringify(this._known));
-            } catch (_e) { /* cache is optional */ }
+            this._saveKnown();
 
             this._lastOnline = online;
             this._indicator.render(this._cams(online));
