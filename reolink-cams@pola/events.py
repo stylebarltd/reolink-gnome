@@ -16,8 +16,25 @@ import xml.etree.ElementTree as XML
 
 from reolink_aio.api import Host
 
+PIDFILE = os.path.join(os.environ.get('XDG_RUNTIME_DIR', '/tmp'), 'reolink-cams-events.pid')
 CHECK = 30      # seconds between connection checks
 RETRY = 30      # seconds before retrying a camera that can't be reached
+
+
+def replace_previous():
+    """Stop a listener left over from before a shell restart: Alt+F2 r re-execs gnome-shell
+    in place, so its children never get their parent-death signal, and every extra listener
+    holds a connection the cameras then refuse to snapshots."""
+    try:
+        with open(PIDFILE) as f:
+            pid = int(f.read().strip())
+        with open(f'/proc/{pid}/cmdline', 'rb') as f:
+            if pid != os.getpid() and b'events.py' in f.read():
+                os.kill(pid, signal.SIGTERM)
+    except (OSError, ValueError):
+        pass
+    with open(PIDFILE, 'w') as f:
+        f.write(str(os.getpid()))
 
 
 def emit(**msg):
@@ -79,6 +96,7 @@ async def main(ips):
 if __name__ == '__main__':
     logging.basicConfig(level=logging.CRITICAL)   # the library warns about every AI type it didn't expect
     ctypes.CDLL(None).prctl(1, signal.SIGTERM)   # PR_SET_PDEATHSIG: die with gnome-shell
+    replace_previous()
     try:
         asyncio.run(main(sys.argv[1:]))
     except KeyboardInterrupt:
