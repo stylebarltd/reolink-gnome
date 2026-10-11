@@ -24,10 +24,16 @@ cp config.example.json ~/.config/reolink-cams/config.json
 chmod 600 ~/.config/reolink-cams/config.json
 ```
 
+The play button, or a click on the thumbnail, streams a camera live in its thumbnail (about 5 fps; snapshots fill the first seconds until the stream's first keyframe). The fullscreen button opens a fullscreen live view in `ffplay` (Esc or `q` closes it). It plays the RTSP stream and switches RTSP on in the camera if it is off; models without RTSP (the plain E1) fall back to main-quality snapshots twice a second.
+
+Cameras that move between LAN and Wi-Fi keep one entry: they are matched by their Reolink UID, not their MAC. `names` accepts a UID as well as a MAC.
+
+Some cameras (seen on the plain E1) only speak Baichuan and refuse snapshots. Bridge them with [Neolink](https://github.com/QuantumEntangledAndy/neolink) (needs `libgstrtspserver-1.0-0` and `gstreamer1.0-plugins-bad`) and point the camera's UID at it with `"rtsp": {"<uid>": "rtsp://127.0.0.1:8554/<name>"}`; thumbnails, play and fullscreen then use `<url>/sub` and `<url>/main`.
+
 Install:
 
 ```sh
 ln -s "$PWD/reolink-cams@pola" ~/.local/share/gnome-shell/extensions/reolink-cams@pola
 ```
 
-Targets GNOME Shell 50.
+Targets GNOME Shell 46–50.

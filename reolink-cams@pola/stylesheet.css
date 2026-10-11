@@ -2,3 +2,5 @@
 .reolink-sub { color: #999; font-size: 0.9em; }
 .reolink-online { color: #57e389; }
 .reolink-offline { color: #ed333b; }
+/* faint pill so neighbouring top-bar items read as separate groups */
+.reolink-chip { background-color: rgba(255, 255, 255, 0.07); border-radius: 8px; padding: 0 8px; margin: 4px 0; }
