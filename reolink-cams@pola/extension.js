@@ -18,6 +18,9 @@ const PYTHON = GLib.build_filenamev([DATA_DIR, 'venv', 'bin', 'python']);   // v
 const SNAP_DIR = GLib.build_filenamev([GLib.get_user_cache_dir(), 'reolink-cams']);
 const RTSP_PORT = 554;
 const CACHE_PATH = GLib.build_filenamev([GLib.get_user_cache_dir(), 'reolink-cams.json']);
+const PINS_PATH = GLib.build_filenamev([CONFIG_DIR, 'pinned.json']);   // {cams: [uid or mac], x, y}
+const PIN_SIZE = [384, 216];
+const PIN_FPS = 2;
 const DEFAULTS = {
     port: 9000,              // Reolink Baichuan/media port (HTTP API is off on these cameras)
     subnet: '',              // e.g. "192.168.1"; empty = auto-detect from default route
@@ -109,6 +112,18 @@ class Indicator extends PanelMenu.Button {
         this._playBtns = new Map();   // mac -> play/stop button
         this._subs = new Map();   // mac -> IP label, which shows the last detection instead
         this._motion = new Map();   // mac -> {active, types, time}
+        this._pinBtns = new Map();   // mac -> pin button
+        this._pinned = new Set();
+    }
+
+    onPin(cb) { this._pinCb = cb; }
+
+    setPinned(macs) {
+        this._pinned = macs;
+        for (const [mac, btn] of this._pinBtns) {
+            if (macs.has(mac)) btn.add_style_class_name('reolink-pinned');
+            else btn.remove_style_class_name('reolink-pinned');
+        }
     }
 
     onOpen(cb) { this.menu.connect('open-state-changed', (_m, open) => cb(open)); }
@@ -201,6 +216,7 @@ class Indicator extends PanelMenu.Button {
         this._dots.clear();
         this._playBtns.clear();
         this._subs.clear();
+        this._pinBtns.clear();
         const live = cams.filter(c => c.online);
         this._count = cams.length ? `${live.length}/${cams.length}` : '0';
         if (!this._notice) this._label.set_text(this._count);
@@ -290,10 +306,130 @@ class Indicator extends PanelMenu.Button {
             this._playBtns.set(c.mac, play);
             box.add_child(play);
             box.add_child(this._iconButton('view-fullscreen-symbolic', () => this._openLive(c)));
+            const pin = this._iconButton('view-pin-symbolic', () => this._pinCb?.(c.mac));
+            if (this._pinned.has(c.mac)) pin.add_style_class_name('reolink-pinned');
+            this._pinBtns.set(c.mac, pin);
+            box.add_child(pin);
         }
         return box;
     }
 });
+
+// Pinned cameras float on the desktop below the top bar, live, until unpinned. Drag a
+// camera's title bar to move the board; it hides itself while a window is fullscreen.
+class PinBoard {
+    constructor({pos, onUnpin, onFullscreen, onMoved}) {
+        this._pos = pos;   // {x, y} once dragged, else top right
+        this._cb = {onUnpin, onFullscreen, onMoved};
+        this._views = new Map();   // mac -> {view, dot, name, pic}
+        this.actor = vbox({style_class: 'reolink-pinboard', reactive: true});
+        Main.layoutManager.addChrome(this.actor, {affectsInputRegion: true, trackFullscreen: true});
+        this.actor.connect('notify::width', () => this._place());
+        Main.layoutManager.connectObject('monitors-changed', () => this._place(), this);
+    }
+
+    has(mac) { return this._views.has(mac); }
+    get size() { return this._views.size; }
+
+    add(mac, name) {
+        const [w, h] = PIN_SIZE;
+        const view = vbox({style_class: 'reolink-pin'});
+        const head = new St.BoxLayout({style_class: 'reolink-pin-head', reactive: true, track_hover: true});
+        const dot = new St.Label({text: '●', style_class: 'reolink-online', y_align: Clutter.ActorAlign.CENTER, style: 'margin-right: 6px;'});
+        const label = new St.Label({text: name, style_class: 'reolink-key', x_expand: true, y_align: Clutter.ActorAlign.CENTER});
+        head.add_child(dot);
+        head.add_child(label);
+        const button = (icon, tip, cb) => {
+            const b = new St.Button({
+                child: new St.Icon({icon_name: icon, icon_size: 14}), style_class: 'reolink-pin-btn',
+                accessible_name: tip, can_focus: true, track_hover: true, y_align: Clutter.ActorAlign.CENTER,
+            });
+            b.connect('clicked', cb);
+            return b;
+        };
+        head.add_child(button('view-fullscreen-symbolic', 'Fullscreen', () => this._cb.onFullscreen(mac)));
+        head.add_child(button('window-close-symbolic', 'Unpin', () => this._cb.onUnpin(mac)));
+        this._dragHandle(head);
+        const pic = new St.Widget({
+            style: `width: ${w}px; height: ${h}px; background-color: #222; border-radius: 6px;`,
+            reactive: true, track_hover: true,
+        });
+        pic.connect('button-release-event', () => { this._cb.onFullscreen(mac); return Clutter.EVENT_STOP; });
+        pic.connect('notify::hover', () => setPointer(pic.hover));
+        view.add_child(head);
+        view.add_child(pic);
+        this.actor.add_child(view);
+        this._views.set(mac, {view, dot, label, pic});
+    }
+
+    remove(mac) {
+        const v = this._views.get(mac);
+        if (!v) return;
+        if (v.pic.hover) setPointer(false);
+        v.view.destroy();
+        this._views.delete(mac);
+    }
+
+    setName(mac, name) { this._views.get(mac)?.label.set_text(name); }
+
+    setFrame(mac, path) {
+        const [w, h] = PIN_SIZE;
+        this._views.get(mac)?.pic.set_style(
+            `background-image: url("file://${path}"); background-size: cover; width: ${w}px; height: ${h}px; border-radius: 6px;`);
+    }
+
+    setMotion(mac, active) {
+        const dot = this._views.get(mac)?.dot;
+        if (!dot) return;
+        dot.style_class = active ? 'reolink-motion' : 'reolink-online';
+        if (active) pulse(dot);
+        else stopPulse(dot);
+    }
+
+    _monitor() { return Main.layoutManager.primaryMonitor; }
+
+    _place() {
+        const m = this._monitor();
+        if (!m) return;
+        const [w, h] = [this.actor.width, this.actor.height];
+        let {x, y} = this._pos ?? {x: m.x + m.width - w - 12, y: m.y + Main.panel.height + 8};
+        // keep it on screen when monitors or the board size change
+        x = Math.max(m.x, Math.min(x, m.x + m.width - w));
+        y = Math.max(m.y + Main.panel.height, Math.min(y, m.y + m.height - h));
+        this.actor.set_position(Math.round(x), Math.round(y));
+    }
+
+    _dragHandle(head) {
+        head.connect('button-press-event', (_a, ev) => {
+            if (ev.get_button() !== Clutter.BUTTON_PRIMARY) return Clutter.EVENT_PROPAGATE;
+            const [px, py] = ev.get_coords();
+            const [ax, ay] = [this.actor.x, this.actor.y];
+            const grab = global.stage.grab(head);
+            global.display.set_cursor(Meta.Cursor.MOVE_OR_RESIZE_WINDOW ?? Meta.Cursor.MOVE);   // renamed in GNOME 47
+            const motion = head.connect('motion-event', (_b, e) => {
+                const [x, y] = e.get_coords();
+                this._pos = {x: ax + x - px, y: ay + y - py};
+                this._place();
+                return Clutter.EVENT_STOP;
+            });
+            const release = head.connect('button-release-event', () => {
+                head.disconnect(motion);
+                head.disconnect(release);
+                grab.dismiss();
+                global.display.set_cursor(Meta.Cursor.DEFAULT);
+                this._cb.onMoved({x: this.actor.x, y: this.actor.y});
+                return Clutter.EVENT_STOP;
+            });
+            return Clutter.EVENT_STOP;
+        });
+    }
+
+    destroy() {
+        Main.layoutManager.disconnectObject(this);
+        this.actor.destroy();
+        this._views.clear();
+    }
+}
 
 export default class ReolinkExtension extends Extension {
     enable() {
@@ -305,12 +441,17 @@ export default class ReolinkExtension extends Extension {
         this._indicator.onRefresh(mac => this._snapshot(mac, true));
         this._indicator.onLive((mac, name) => this._live(mac, name));
         this._indicator.onPlay(mac => this._togglePlay(mac));
+        this._indicator.onPin(mac => this._togglePin(mac));
+        this._killStrays();
+        this._pins = {cams: [], ...(readJson(PINS_PATH) ?? {})};
+        this._pinStreams = new Map();
         this._indicator.onOpen(open => {
             if (open) this._startSnapshots();
             else { this._stopSnapshots(); this._stopPlay(); global.display.set_cursor(Meta.Cursor.DEFAULT); }
         });
         Main.panel.addToStatusArea(this.uuid, this._indicator);
         this._indicator.render(this._cams());
+        this._syncPins();
         this._scan();
         this._timer = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, this._cfg.refreshSeconds, () => {
             this._scan();
@@ -323,6 +464,13 @@ export default class ReolinkExtension extends Extension {
         this._stopSnapshots();
         this._stopPlay();
         this._stopEvents();
+        for (const mac of [...(this._pinStreams?.keys() ?? [])]) this._stopPin(mac);
+        this._pinStreams = null;
+        if (this._pinRetry) GLib.source_remove(this._pinRetry);
+        this._pinRetry = null;
+        this._pinFrames = null;
+        this._board?.destroy();
+        this._board = null;
         this._source?.destroy();
         this._source = null;
         this._alerted = null;
@@ -361,7 +509,8 @@ export default class ReolinkExtension extends Extension {
                 // each camera on its own pace: a slow one (stream grab ~7 s) must not hold up the rest
                 this._snapBusy ??= new Set();
                 for (const mac of online) {
-                    if (mac === this._playMac || this._snapBusy.has(mac)) continue;
+                    // pinned cameras already stream; their frames reach the menu too
+                    if (mac === this._playMac || this._pinStreams?.has(mac) || this._snapBusy.has(mac)) continue;
                     this._snapBusy.add(mac);
                     this._snapshot(mac).finally(() => this._snapBusy?.delete(mac));
                 }
@@ -464,12 +613,14 @@ export default class ReolinkExtension extends Extension {
                 const m = {...prev, active: false};
                 this._motionState.set(mac, m);
                 this._indicator.setMotion(mac, m);
+                this._board?.setMotion(mac, false);
             }
             return;
         }
         const m = {active: true, types, time: Date.now()};
         this._motionState.set(mac, m);
         this._indicator.setMotion(mac, m);
+        this._board?.setMotion(mac, true);
         this._alert(mac, types).catch(e => console.error(`reolink-cams: alert: ${e.message}`));
     }
 
@@ -653,6 +804,169 @@ export default class ReolinkExtension extends Extension {
         this._prep = {name, sig, timer};
     }
 
+    // pinned.json stores the camera's UID when known, so a pin survives a LAN/Wi-Fi switch
+    _pinKey(mac) { return this._known?.[mac]?.uid ?? mac; }
+
+    _pinnedMacs() {
+        const online = this._lastOnline ?? new Set();
+        const macs = new Set();
+        for (const key of this._pins.cams) {
+            const matches = Object.keys(this._known).filter(m => m === key || this._known[m].uid === key);
+            const mac = matches.find(m => online.has(m)) ?? matches[0];
+            if (mac) macs.add(mac);
+        }
+        return macs;
+    }
+
+    _savePins() {
+        try {
+            GLib.mkdir_with_parents(CONFIG_DIR, 0o755);
+            GLib.file_set_contents(PINS_PATH, JSON.stringify(this._pins));
+        } catch (e) { console.error(`reolink-cams: pins: ${e.message}`); }
+    }
+
+    _togglePin(mac) {
+        const key = this._pinKey(mac);
+        const pinned = this._pinnedMacs().has(mac);
+        this._pins.cams = pinned
+            ? this._pins.cams.filter(k => k !== key && k !== mac)
+            : [...this._pins.cams, key];
+        this._savePins();
+        this._syncPins();
+    }
+
+    // Board views and streams follow the pin list; a pinned camera streams while it is online.
+    _syncPins() {
+        if (!this._indicator) return;
+        const macs = this._pinnedMacs();
+        this._indicator.setPinned(macs);
+        const names = new Map(this._cams(this._lastOnline ?? undefined).map(c => [c.mac, c.name]));
+        if (macs.size && !this._board) {
+            this._board = new PinBoard({
+                pos: Number.isFinite(this._pins.x) ? {x: this._pins.x, y: this._pins.y} : null,
+                onUnpin: mac => this._togglePin(mac),
+                onFullscreen: mac => this._live(mac, names.get(mac) ?? mac),
+                onMoved: ({x, y}) => { Object.assign(this._pins, {x, y}); this._savePins(); },
+            });
+        }
+        for (const mac of [...this._pinStreams.keys()]) {
+            if (!macs.has(mac) || !this._lastOnline?.has(mac)) this._stopPin(mac);
+        }
+        if (this._board) {
+            for (const mac of [...this._board._views.keys()]) if (!macs.has(mac)) this._board.remove(mac);
+            for (const mac of macs) {
+                if (!this._board.has(mac)) this._board.add(mac, names.get(mac) ?? mac);
+                else this._board.setName(mac, names.get(mac) ?? mac);
+                if (this._lastOnline?.has(mac) && !this._pinStreams.has(mac))
+                    this._startPin(mac).catch(e => console.error(`reolink-cams: pin: ${e.message}`));
+            }
+            if (!this._board.size) {
+                this._board.destroy();
+                this._board = null;
+            }
+        }
+    }
+
+    // Low-rate live stream for a pinned camera (sub stream, PIN_FPS), restarted if it drops;
+    // cameras without RTSP get a snapshot every snapshotSeconds instead.
+    async _startPin(mac) {
+        const st = {};
+        this._pinStreams.set(mac, st);
+        const ip = this._known?.[mac]?.ip;
+        const base = this._rtspBase(mac);
+        const rtsp = base || (ip && await this._probe(ip, RTSP_PORT));
+        if (this._pinStreams?.get(mac) !== st) return;
+        if (!rtsp) {
+            while (this._pinStreams?.get(mac) === st) {
+                const frame = await this._snapshot(mac, false);
+                if (frame && this._pinStreams?.get(mac) === st) this._pinFrame(mac, frame);
+                await new Promise(r => GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, this._cfg.snapshotSeconds, () => { r(); return GLib.SOURCE_REMOVE; }));
+            }
+            return;
+        }
+        const {user, password} = this._cfg;
+        const url = base ? `${base}/sub`
+            : `rtsp://${encodeURIComponent(user)}:${encodeURIComponent(password)}@${ip}:${RTSP_PORT}/h264Preview_01_sub`;
+        const out = GLib.build_filenamev([SNAP_DIR, `${mac.replaceAll(':', '')}-pin.jpg`]);
+        GLib.mkdir_with_parents(SNAP_DIR, 0o755);
+        st.proc = new Gio.Subprocess({
+            argv: ['ffmpeg', '-loglevel', 'error', '-rtsp_transport', 'tcp', '-i', url,
+                '-an', '-vf', `fps=${PIN_FPS}`, '-q:v', '5', '-update', '1', '-atomic_writing', '1', '-y', out],
+            flags: Gio.SubprocessFlags.STDERR_SILENCE,
+        });
+        st.proc.init(null);
+        let last = 0;
+        st.timer = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 250, () => {
+            try {
+                const t = Gio.File.new_for_path(out).query_info('time::modified,time::modified-usec', Gio.FileQueryInfoFlags.NONE, null)
+                    .get_modification_date_time().to_unix_usec();
+                if (t !== last) {
+                    last = t;
+                    this._pinFrame(mac, out);
+                }
+            } catch (_e) { /* no frame yet */ }
+            return GLib.SOURCE_CONTINUE;
+        });
+        // until the first keyframe arrives (a few seconds), show a snapshot
+        if (!this._pinFrames?.has(mac)) {
+            this._snapshot(mac, false).then(f => {
+                if (f && !last && this._pinStreams?.get(mac) === st) this._pinFrame(mac, f);
+            });
+        }
+        st.proc.wait_async(null, () => {
+            if (this._pinStreams?.get(mac) !== st) return;   // stopped on purpose
+            // stream dropped (Wi-Fi, camera reboot): try again shortly
+            this._stopPin(mac);
+            this._pinRetry ??= GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 5, () => {
+                this._pinRetry = null;
+                this._syncPins();
+                return GLib.SOURCE_REMOVE;
+            });
+        });
+    }
+
+    _stopPin(mac) {
+        const st = this._pinStreams?.get(mac);
+        if (!st) return;
+        this._pinStreams.delete(mac);
+        if (st.timer) GLib.source_remove(st.timer);
+        st.proc?.force_exit();
+    }
+
+    _pinFrame(mac, src) {
+        if (!this._board) return;
+        const frame = GLib.build_filenamev([SNAP_DIR, `${mac.replaceAll(':', '')}-pin-${Date.now()}.jpg`]);
+        try {
+            Gio.File.new_for_path(src).copy(Gio.File.new_for_path(frame), Gio.FileCopyFlags.OVERWRITE, null, null);
+        } catch (_e) { return; }
+        this._pinFrames ??= new Map();
+        const prev = this._pinFrames.get(mac);
+        this._pinFrames.set(mac, frame);
+        this._board.setFrame(mac, frame);
+        if (prev) try { Gio.File.new_for_path(prev).delete(null); } catch (_e) { /* gone */ }
+        // the open menu shows the same picture, unless that tile plays its own video
+        if (this._snapLoop && !(this._playMac === mac && this._playLive)) this._showFrame(mac, src, Gio.FileCopyFlags.OVERWRITE);
+    }
+
+    // Alt+F2 r re-execs gnome-shell in place: its stream children never get a parent-death
+    // signal and would keep a camera connection each. Stop those left from before.
+    _killStrays() {
+        try {
+            const en = Gio.File.new_for_path('/proc').enumerate_children('standard::name', Gio.FileQueryInfoFlags.NONE, null);
+            let info;
+            while ((info = en.next_file(null))) {
+                const pid = info.get_name();
+                if (!/^\d+$/.test(pid)) continue;
+                try {
+                    const [, bytes] = GLib.file_get_contents(`/proc/${pid}/cmdline`);
+                    const argv = new TextDecoder().decode(bytes).split('\0');
+                    if (GLib.path_get_basename(argv[0]) === 'ffmpeg' && argv.some(a => a.startsWith(SNAP_DIR)))
+                        GLib.spawn_command_line_async(`kill ${pid}`);
+                } catch (_e) { /* exited meanwhile */ }
+            }
+        } catch (e) { console.error(`reolink-cams: ${e.message}`); }
+    }
+
     _rtspBase(mac) {
         const k = this._known?.[mac];
         return this._cfg.rtsp[k?.uid] ?? this._cfg.rtsp[mac] ?? null;
@@ -768,6 +1082,7 @@ export default class ReolinkExtension extends Extension {
             this._lastOnline = online;
             this._indicator.render(this._cams(online));
             this._watchEvents(online);
+            this._syncPins();
             this._indicator.setStatus(`Scanned ${subnet}.0/24 · ${new Date().toLocaleTimeString()}`);
         } catch (e) {
             if (!cancel.is_cancelled()) this._indicator?.setStatus(`Scan failed: ${e.message}`);

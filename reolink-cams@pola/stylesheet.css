@@ -18,3 +18,9 @@
 #panel .reolink-button:checked:hover .reolink-chip { background-color: rgba(255, 255, 255, 0.32); }
 .reolink-motion { color: #ff7b63; }
 .reolink-alert-text { color: #ff7b63; font-size: 0.9em; }
+.reolink-pinned { color: #78aeed; background-color: rgba(120, 174, 237, 0.18); }
+.reolink-pinboard { spacing: 8px; }
+.reolink-pin { spacing: 4px; padding: 6px; border-radius: 12px; background-color: rgba(30, 30, 30, 0.92); box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5); }
+.reolink-pin-head { spacing: 4px; padding: 0 2px 0 4px; }
+.reolink-pin-btn { border-radius: 999px; padding: 4px; color: #ccc; }
+.reolink-pin-btn:hover { background-color: rgba(255, 255, 255, 0.15); color: white; }

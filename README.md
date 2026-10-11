@@ -30,6 +30,8 @@ Cameras that move between LAN and Wi-Fi keep one entry: they are matched by thei
 
 Some cameras (seen on the plain E1) only speak Baichuan and refuse snapshots. Bridge them with [Neolink](https://github.com/QuantumEntangledAndy/neolink) (needs `libgstrtspserver-1.0-0` and `gstreamer1.0-plugins-bad`) and point the camera's UID at it with `"rtsp": {"<uid>": "rtsp://127.0.0.1:8554/<name>"}`; thumbnails, play and fullscreen then use `<url>/sub` and `<url>/main`.
 
+The pin button keeps a camera on screen: pinned cameras float below the top bar as live views (sub stream, 2 fps) until you unpin them with their ×, also across restarts. Drag a view's title bar to move them; a click on the picture opens fullscreen, and they hide while a window is fullscreen. Pins are kept in `~/.config/reolink-cams/pinned.json` by camera UID.
+
 Motion alerts: the cameras push their detections (the extension keeps one Baichuan connection per camera open). When a camera sees a person or a vehicle, its dot turns red and pulses, the top-bar icon pulses red, the detection and time show under the camera name for 30 minutes, and a notification with a fresh snapshot pops up (click it to watch live). Options: `alertTypes` (default `["people", "vehicle"]`; also `dog_cat`, or `motion` for any motion), `alertCameras` (names, UIDs or MACs; empty = all), `alertCooldownSeconds` (default 120, per camera) and `alertQuietHours` (e.g. `"23:00-06:00"`, no notifications then).
 
 Install:
