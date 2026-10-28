@@ -96,7 +96,8 @@ class Indicator extends PanelMenu.Button {
         const box = new St.BoxLayout({style_class: 'panel-status-menu-box reolink-chip'});
         this._icon = new St.Icon({icon_name: 'camera-web-symbolic', style_class: 'system-status-icon'});
         box.add_child(this._icon);
-        this._label = new St.Label({text: '…', y_align: Clutter.ActorAlign.CENTER});
+        // only speaks up when there is something to say: a notice, or a camera that is down
+        this._label = new St.Label({text: '', y_align: Clutter.ActorAlign.CENTER, visible: false});
         box.add_child(this._label);
         this.add_child(box);
 
@@ -150,8 +151,16 @@ class Indicator extends PanelMenu.Button {
     // Temporary top-bar text (e.g. while a live view starts); null restores the camera count.
     setNotice(text) {
         this._notice = text;
-        this._label.set_text(text ?? this._count ?? '…');
+        this._updateLabel();
         this._updateIcon();
+    }
+
+    // Top-bar text next to the icon: a notice while one is set, else the online count only
+    // while a camera is down or none were found. All cameras up shows the icon alone.
+    _updateLabel() {
+        const text = this._notice ?? (this._down ? this._count : null);
+        this._label.set_text(text ?? '');
+        this._label.visible = text != null;
     }
 
     // Motion state of a camera: red pulsing dot while active, last detection under its name.
@@ -219,7 +228,8 @@ class Indicator extends PanelMenu.Button {
         this._pinBtns.clear();
         const live = cams.filter(c => c.online);
         this._count = cams.length ? `${live.length}/${cams.length}` : '0';
-        if (!this._notice) this._label.set_text(this._count);
+        this._down = !cams.length || live.length < cams.length;
+        this._updateLabel();
         if (!cams.length) {
             this._list.addMenuItem(new PopupMenu.PopupMenuItem('No cameras found', {reactive: false}));
             return;
@@ -449,7 +459,7 @@ export default class ReolinkExtension extends Extension {
             if (open) this._startSnapshots();
             else { this._stopSnapshots(); this._stopPlay(); global.display.set_cursor(Meta.Cursor.DEFAULT); }
         });
-        Main.panel.addToStatusArea(this.uuid, this._indicator);
+        Main.panel.addToStatusArea(this.uuid, this._indicator, -1, 'left'); // left side of the top bar, after Activities
         this._indicator.render(this._cams());
         this._syncPins();
         this._scan();

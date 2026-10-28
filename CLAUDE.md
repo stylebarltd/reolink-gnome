@@ -27,6 +27,8 @@ journalctl -f -o cat /usr/bin/gnome-shell
 Reload after a change: X11 `Alt+F2`, `r`; Wayland: log out and back in.
 
 ## Gotchas
+- The top bar shows the camera icon alone while every camera is online; the `x/y` count
+  only appears when one is down or none were found. Notices still show.
 - Cameras are matched by Reolink UID, not MAC, so LAN/Wi-Fi moves keep one entry.
 - Some cameras (seen on the plain E1) only speak Baichuan and refuse snapshots; they
   need Neolink as a bridge (see README).
